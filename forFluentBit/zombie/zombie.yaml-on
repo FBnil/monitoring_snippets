@@ -23,7 +23,7 @@ pipeline:
 
   outputs:
     - name: stdout
-      match: '*'
+      match: 'maintenance_check'
 
   filters:
     - name: lua
@@ -154,7 +154,7 @@ pipeline:
           end
   outputs:
     - name: stdout
-      match: '*'
+      match: 'zombie'
 
 parsers:
   - name: zombie_count_regex
