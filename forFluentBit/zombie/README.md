@@ -25,7 +25,7 @@ Where all monitoring is de-configured until we go out of maintenance. When we de
 
 ## Usage
 
-To start using it, copy the "on" in place (one-time action), then start Fluent-Bit:
+To start using it, copy the "on" in place (one-time action), then start [Fluent-Bit](https://fluentbit.io/):
 
 ```
 cp zombie.yaml-on zombie.yaml
