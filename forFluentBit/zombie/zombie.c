@@ -17,6 +17,6 @@ int main ()
 // https://vitux.com/how-to-create-a-dummy-zombie-process-in-ubuntu/
 
 // ps -A -ostat,pid,ppid | grep -e '[zZ]'
-//https://itsfoss.com/kill-zombie-process-linux/
+// https://itsfoss.com/kill-zombie-process-linux/
 
 // cc -g -o zombie zombie.c
