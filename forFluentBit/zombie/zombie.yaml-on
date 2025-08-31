@@ -1,0 +1,169 @@
+service:
+  hot_reload: true
+env:
+  MONVERSION: '1.0.0' # In Lua read this value as FLB_ENV["MONVERSION"]
+  MAINTENANCE_FILE: '/tmp/MAINTENANCEMODE'
+  FORCE_REPORTING: 10 # Force reporting each 10 loops. set to -1 to disable
+pipeline:
+  inputs:
+    - name: exec
+      tag:  zombie
+      command: /usr/bin/ps aux | /usr/bin/awk '$8 ~ /^[zZ]/' | /usr/bin/wc -l
+      parser:  zombie_count_regex
+      interval_sec:    5 # Use 600 (each 10 minutes) by default
+      interval_nsec: 900
+      buf_size:      16kb
+      mem_buf_limit: 16kb
+      oneshot:     false
+  inputs:
+    - name: dummy
+      dummy: '{"message": "maintenance_check"}'
+      tag:  maintenance_check
+      interval_sec:    5
+
+  outputs:
+    - name: stdout
+      match: '*'
+
+  filters:
+    - name: lua
+      match: maintenance_check
+      call: do_maintenance_check
+      code: |
+          GLOBAL_maintenance = -1
+
+          function file_exists(name)
+            if name == nil or name == "" then
+              return nil
+            end
+            local f = io.open(name, "r")
+            return f ~= nil and io.close(f)
+          end
+
+          -- https://www.linuxquestions.org/questions/programming-9/lua-how-to-get-process-id-944366/
+          -- retrieve Parent ProcessID (Fluent-Bit)
+          function get_ppid()
+            local fh = io.popen([[/usr/bin/cat /proc/self/stat |/usr/bin/awk '{print $5}']])
+            local PPID = fh:read("*a")
+            fh:close()
+            if PPID ~=nil then
+              PPID = string.gsub(PPID, "%s+$", "")
+            end
+            print("DEBUG: Fluent-Bit PID=".. PPID)
+            return PPID
+          end
+          
+          -- Get configuration filename from the arguments of the running Fluent-Bit
+          function get_config(ppid)
+            local ppid = ppid or get_ppid()
+            local fh = io.popen("/usr/bin/cat /proc/" .. ppid .. "/cmdline")
+            local LINESTR = fh:read("*a")
+            fh:close()
+            LINESTR = LINESTR .. "\0"
+            print("DEBUG: LINESTR=",LINESTR)
+
+            local found = 0
+            local CFG_FILE = nil
+            for p in string.gmatch(LINESTR, "[^%z]+") do 
+              if found == 1 then
+                CFG_FILE = p
+                found = 2
+              elseif p == '-c' then
+                found = 1
+              end
+            end
+            print("DEBUG: get_config found="..found,CFG_FILE)
+            return CFG_FILE
+          end
+
+
+          -- main function called in Fluent-Bit
+          function do_maintenance_check(tag, timestamp, record)
+            local is_maintenance = file_exists(FLB_ENV["MAINTENANCE_FILE"])
+
+            if is_maintenance and ( GLOBAL_maintenance == 0 or GLOBAL_maintenance == -1) then
+              print("DEBUG: GOING INTO MAINTENANCEMODE!")
+              GLOBAL_maintenance=1
+              local PID = get_ppid()
+              local config_file = get_config(PID)
+              print("DEBUG: Got config file",config_file)
+              if PID ~= nil then
+                -- we copy the "off" file over the active yaml file, and then force a hot_reload
+                -- can also be replaced by swapping a symlink: /usr/bin/ln -sf but requires an initial symlink
+                local openPop = assert(io.popen("/usr/bin/cp "..config_file.."-off "..config_file, 'r'))
+                local output = openPop:read('*all')
+                openPop:close()
+                -- print(output)
+                os.execute("kill -1 " .. PID) -- Force hot_reload (but only if hot_reload: true)
+              end
+            elseif not is_maintenance and GLOBAL_maintenance == 1 then
+              print("DEBUG: COMING OUT OF MAINTENANCEMODE")
+              GLOBAL_maintenance=0
+            else
+              print("DEBUG: NO STATE CHANGE FOR MAINTENANCEMODE " .. GLOBAL_maintenance)
+            end
+            return -1, timestamp, record  -- we always drop this dummy event
+          end
+
+    - name: lua
+      match: zombie
+      call: zombie_state_changes
+      code: |
+          GLOBAL_zombie_LOOP_COUNTER = 0
+          GLOBAL_zombie_previous_count = -1
+          GLOBAL_zombie_force_report = -1
+          if FLB_ENV["FORCE_REPORTING"] ~= nil then
+            GLOBAL_zombie_force_report = tonumber(FLB_ENV["FORCE_REPORTING"])
+          end
+
+          for n,v in pairs(FLB_ENV) do print("DEBUG: FLB_ENV:"..n.."="..v) end
+
+          function zombie_state_changes(tag, timestamp, record)
+            -- for k,v in pairs(record) do print(k,v) end
+            GLOBAL_zombie_LOOP_COUNTER = GLOBAL_zombie_LOOP_COUNTER + 1
+            print("DEBUG: LOOP=" .. GLOBAL_zombie_LOOP_COUNTER)
+
+            if GLOBAL_maintenance == 1 then
+              print("DEBUG: zombie_state_changes: MAINTENANCEMODE")
+              return -1, timestamp, record
+            end
+
+            local p = GLOBAL_zombie_previous_count
+            local c = record["count"]
+            if type(p) ~= "number" then
+              p = -1
+            end
+            if type(c) ~= "number" then
+              c = -1
+            end
+
+            -- use (3600 / interval_sec) to force reporting each hour. Thus: 10 when interval_sec=360
+            if GLOBAL_zombie_force_report>0 and GLOBAL_zombie_LOOP_COUNTER % GLOBAL_zombie_force_report == 0 then
+              print("DEBUG: Forcing reporting prev=" .. p .. " count=" .. c)
+              -- GLOBAL_zombie_LOOP_COUNTER = 0
+              GLOBAL_zombie_previous_count = c
+              return 0, timestamp, record
+            elseif c == p then
+              print("DEBUG: Count is equal to Prev, dropping prev=" .. p .. " count=" .. c)
+              return -1, timestamp, record
+            else
+              print("DEBUG: Count is different, reporting. prev=" .. p .. " count=" .. c)
+              GLOBAL_zombie_previous_count = c
+              return 0, timestamp, record
+            end
+          end
+  outputs:
+    - name: stdout
+      match: '*'
+
+parsers:
+  - name: zombie_count_regex
+    format: regex
+    regex:  '^(?<count>[0-9]+)$'
+    types: count:integer
+
+# To generate a zombie, see:
+# In perl: https://slides.code-maven.com/linux/zombie-demonstration
+# In C:    https://vitux.com/how-to-create-a-dummy-zombie-process-in-ubuntu/
+#
+# To generate a regex use https://rubular.com/

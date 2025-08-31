@@ -1,0 +1,94 @@
+service:
+  hot_reload: true
+env:
+  MONVERSION: '1.0.0' # In Lua read this value as FLB_ENV["MONVERSION"]
+  MAINTENANCE_FILE: '/tmp/MAINTENANCEMODE'
+  FORCE_REPORTING: 10 # Force reporting each 10 loops. set to -1 to disable
+pipeline:
+  inputs:
+    - name: dummy
+      dummy: '{"message": "maintenance_check"}'
+      tag:  maintenance_check
+      interval_sec:    5
+
+  filters:
+    - name: lua
+      match: maintenance_check
+      call: do_maintenance_check
+      code: |
+          GLOBAL_maintenance = 1
+
+          function file_exists(name)
+            if name == nil or name == "" then
+              return nil
+            end
+            local f = io.open(name, "r")
+            return f ~= nil and io.close(f)
+          end
+
+          function get_ppid()
+            local fh = io.popen([[/usr/bin/cat /proc/self/stat |/usr/bin/awk '{print $5}']])
+            local PPID = fh:read("*a")
+            fh:close()
+            if PPID ~=nil then
+              PPID = string.gsub(PPID, "%s+$", "")
+            end
+            print("DEBUG: Fluent-Bit PID=".. PPID)
+            return PPID
+          end
+          
+          function get_config(ppid)
+            local ppid = ppid or get_ppid()
+            local fh = io.popen("/usr/bin/cat /proc/" .. ppid .. "/cmdline")
+            local LINESTR = fh:read("*a")
+            fh:close()
+            LINESTR = LINESTR .. "\0"
+            print("DEBUG: LINESTR=",LINESTR)
+
+            local found = 0
+            local CFG_FILE = nil
+            for p in string.gmatch(LINESTR, "[^%z]+") do 
+              if found == 1 then
+                CFG_FILE = p
+                found = 2
+              elseif p == '-c' then
+                found = 1
+              end
+            end
+            print("DEBUG: get_config found="..found,CFG_FILE)
+            return CFG_FILE
+          end
+
+
+          -- main function called in Fluent-Bit
+          function do_maintenance_check(tag, timestamp, record)
+            local is_maintenance = file_exists(FLB_ENV["MAINTENANCE_FILE"])
+            if not is_maintenance then
+              print("DEBUG: GOING OUT OF MAINTENANCEMODE!")
+              GLOBAL_maintenance = 0
+              local PID = get_ppid()
+              local config_file = get_config(PID)
+              print("DEBUG: Got config file",config_file)
+              if PID ~= nil then
+                local openPop = assert(io.popen("/usr/bin/cp "..config_file.."-on "..config_file, 'r'))
+                local output = openPop:read('*all')
+                openPop:close()
+                print(output)
+                os.execute("kill -1 " .. PID) -- Force hot_reload (but only if hot_reload: true)
+              end
+            else
+              print("DEBUG: IN MAINTENANCEMODE " .. GLOBAL_maintenance)
+              GLOBAL_maintenance = GLOBAL_maintenance + 1
+            end
+            return -1, timestamp, record -- we always drop this dummy event
+          end
+
+  outputs:
+    - name: stdout
+      match: '*'
+
+parsers:
+  - name: zombie_count_regex
+    format: regex
+    regex:  '^(?<count>[0-9]+)$'
+    types: count:integer
