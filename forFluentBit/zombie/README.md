@@ -6,7 +6,7 @@ This configuration features:
 
 - States
 
->Report only on changes, not on each cycle.
+>Report only on changes, not on each cycle. There is also a periodical forced reporting (optional).
 
 - Maintenance mode
 
@@ -21,7 +21,7 @@ Using global Lua variables, we remember the value (the previous amount of zombie
 
 ### Maintenance mode
 
-Where all monitoring is de-configured until we go out of maintenance. When we detect a maintenance file, we swap the configuration file with an empty one, then trigger a hot restart of Fluent-Bit, which re-reads the configuration file (and wipes the global memory when doing so)
+Where all monitoring is de-configured until we go out of maintenance. When we detect a maintenance file, we swap the configuration file with an empty one, then trigger a hot restart of Fluent-Bit, which re-reads the configuration file (and wipes the global memory when doing so). It uses [hot_reload](https://docs.fluentbit.io/manual/administration/hot-reload). Please understand the security implications of a potential Denial Of Service when enabling hot_reload.
 
 ## Usage
 
